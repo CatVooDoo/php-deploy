@@ -1,0 +1,29 @@
+# Секреты и локальные настройки
+.env
+src/.env
+docker-compose.override.yaml
+
+# Зависимости и сборка
+src/vendor/
+src/node_modules/
+src/public/build/
+
+# Дампы, загрузки и рантайм-файлы приложения
+*.sql.gz
+dump.sql
+src/public/uploads/*
+!src/public/uploads/.gitkeep
+src/storage/logs/*
+!src/storage/logs/.gitkeep
+src/storage/cache/*
+!src/storage/cache/.gitkeep
+
+# Сертификаты (на сервере монтируются с хоста)
+docker/nginx/certs/*
+!docker/nginx/certs/.gitkeep
+
+# Мусор ОС и IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

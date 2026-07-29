@@ -1,0 +1,71 @@
+# Профиль HTTPS — редирект HTTP→HTTPS + TLS.
+# Включается переключением в .env:
+#   NGINX_TEMPLATES=./docker/nginx/templates/https
+#
+# ВАЖНО: nginx не стартует, если на хосте нет сертификата
+#   /etc/letsencrypt/live/${APP_HOST}/fullchain.pem
+# Сначала выпустите сертификат на профиле http (см. DEPLOY.md), потом переключайтесь.
+#
+# ${APP_HOST} подставляется из .env при старте контейнера.
+
+server {
+    listen 80;
+    server_name ${APP_HOST} www.${APP_HOST};
+
+    # Челленджи certbot должны оставаться доступными по HTTP —
+    # иначе продление сертификата упрётся в редирект.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html/public;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${APP_HOST} www.${APP_HOST};
+
+    # /etc/letsencrypt монтируется с хоста (см. docker-compose.yaml).
+    ssl_certificate     /etc/letsencrypt/live/${APP_HOST}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${APP_HOST}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    root /var/www/html/public;
+    index index.php index.html;
+
+    client_max_body_size ${UPLOAD_LIMIT};
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/font-woff2 image/svg+xml;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass php:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTPS on;
+        fastcgi_read_timeout 300;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+        include fastcgi_params;
+    }
+
+    location ~* \.(jpg|jpeg|png|gif|ico|svg|css|js|woff2?)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+}

@@ -1,0 +1,52 @@
+# Профиль HTTP — работает сразу, без сертификатов.
+# Используется, когда NGINX_TEMPLATES=./docker/nginx/templates/http (значение по умолчанию).
+# Подходит для локальной разработки и для первого запуска на чистом сервере,
+# пока ещё не выпущен сертификат Let's Encrypt.
+#
+# ${APP_HOST} подставляется из .env при старте контейнера.
+
+server {
+    listen 80;
+    server_name ${APP_HOST} www.${APP_HOST};
+
+    # Webroot для certbot: сюда certbot кладёт ACME-челленджи при выпуске
+    # и продлении сертификата (см. DEPLOY.md).
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/html/public;
+    }
+
+    root /var/www/html/public;
+    index index.php index.html;
+
+    client_max_body_size ${UPLOAD_LIMIT};
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/font-woff2 image/svg+xml;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass php:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_read_timeout 300;
+        fastcgi_buffers 16 16k;
+        fastcgi_buffer_size 32k;
+        include fastcgi_params;
+    }
+
+    location ~* \.(jpg|jpeg|png|gif|ico|svg|css|js|woff2?)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    # Запрещаем доступ ко всем скрытым файлам (.env, .git и т.д.),
+    # кроме .well-known (ACME-челленджи и пр.).
+    location ~ /\.(?!well-known) {
+        deny all;
+    }
+}

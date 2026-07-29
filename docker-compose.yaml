@@ -1,0 +1,191 @@
+# Шаблон окружения: nginx + PHP-FPM + MariaDB + Redis + phpMyAdmin + Mailpit.
+# Все значения берутся из .env (см. .env.example). У каждой переменной есть
+# безопасный дефолт, поэтому окружение поднимается и без .env.
+
+# Общие куски для php и workspace — чтобы не дублировать конфигурацию.
+x-php-base: &php-base
+  build:
+    context: ./docker/php
+    args:
+      PHP_VERSION: ${PHP_VERSION:-8.4}
+      # UID/GID хоста: php-fpm внутри контейнера работает от них, поэтому
+      # он может писать в примонтированные каталоги (логи, кэш, загрузки),
+      # а созданные им файлы остаются доступны вам на хосте.
+      # Значения подставляет make init; после их смены — make rebuild.
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+  restart: unless-stopped
+  working_dir: /var/www/html
+  volumes:
+    - ./src:/var/www/html
+    - ./docker/php/conf.d/custom.ini:/usr/local/etc/php/conf.d/zz-custom.ini:ro
+    - ./docker/php/conf.d/xdebug.ini:/usr/local/etc/php/conf.d/zz-xdebug.ini:ro
+    - composer_cache:/root/.composer
+  extra_hosts:
+    # Нужно для Xdebug на Linux; на macOS/Windows не мешает.
+    - "host.docker.internal:host-gateway"
+  networks:
+    - app_network
+
+x-php-env: &php-env
+  APP_ENV: ${APP_ENV:-production}
+  DB_HOST: mariadb
+  DB_PORT: 3306
+  DB_DATABASE: ${DB_DATABASE:-app}
+  DB_USERNAME: ${DB_USERNAME:-app}
+  DB_PASSWORD: ${DB_PASSWORD:-app}
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  MAIL_HOST: ${MAIL_HOST:-mailpit}
+  MAIL_PORT: ${MAIL_PORT:-1025}
+  XDEBUG_MODE: ${XDEBUG_MODE:-off}
+
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_nginx
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-80}:80"
+      - "${APP_SSL_PORT:-443}:443"
+    environment:
+      # Подставляются в шаблон конфига через envsubst при старте контейнера.
+      APP_HOST: ${APP_HOST:-localhost}
+      UPLOAD_LIMIT: ${UPLOAD_LIMIT:-256M}
+    volumes:
+      - ./src:/var/www/html
+      # Профиль конфига: http (по умолчанию) или https — см. .env
+      - ${NGINX_TEMPLATES:-./docker/nginx/templates/http}:/etc/nginx/templates:ro
+      # Каталог с сертификатами. По умолчанию ./docker/nginx/certs — туда же
+      # их кладёт certbot (make ssl). Для сертификатов, выпущенных на хосте,
+      # укажите в .env SSL_CERTS_DIR=/etc/letsencrypt
+      - ${SSL_CERTS_DIR:-./docker/nginx/certs}:/etc/letsencrypt:ro
+    # Раз в 6 часов перечитываем конфиг, чтобы подхватить продлённый сертификат.
+    # Штатный entrypoint (envsubst по шаблонам) при этом сохраняется.
+    command: >
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    depends_on:
+      php:
+        condition: service_started
+    networks:
+      - app_network
+
+  # Выпуск и продление сертификатов Let's Encrypt.
+  # Запускается только с профилем ssl (его включает make ssl), поэтому
+  # локальному окружению не мешает. Разовые команды — через make ssl / ssl-renew.
+  certbot:
+    image: certbot/certbot:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_certbot
+    profiles: ["ssl"]
+    restart: unless-stopped
+    volumes:
+      # rw: сюда certbot пишет сертификаты (nginx монтирует этот же каталог ro)
+      - ${SSL_CERTS_DIR:-./docker/nginx/certs}:/etc/letsencrypt
+      # webroot для ACME-челленджей — тот же document root, что у nginx
+      - ./src:/var/www/html
+    # Проверка продления раз в 12 часов (сертификат обновится за 30 дней до
+    # истечения, в остальных случаях certbot просто ничего не делает).
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/html/public; sleep 12h & wait $${!}; done"
+    networks:
+      - app_network
+
+  php:
+    <<: *php-base
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_php
+    environment: *php-env
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Контейнер для ручной работы: composer, artisan, npm и т.д.
+  # Вход: make shell (или docker compose exec workspace bash).
+  workspace:
+    <<: *php-base
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_workspace
+    environment: *php-env
+    tty: true
+    entrypoint: /bin/bash
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-lts}
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-secret}
+      MARIADB_DATABASE: ${DB_DATABASE:-app}
+      MARIADB_USER: ${DB_USERNAME:-app}
+      MARIADB_PASSWORD: ${DB_PASSWORD:-app}
+    # Порт привязан к 127.0.0.1: наружу БД не торчит. Доступ извне — SSH-туннель.
+    ports:
+      - "127.0.0.1:${MARIADB_PORT:-3306}:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./docker/mariadb/config:/etc/mysql/conf.d
+      - ./docker/mariadb/init:/docker-entrypoint-initdb.d
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  redis:
+    image: redis:alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: mariadb
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: ${UPLOAD_LIMIT:-256M}
+    ports:
+      - "127.0.0.1:${PMA_PORT:-8080}:80"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - app_network
+
+  # Перехват исходящей почты: SMTP на 1025, веб-интерфейс на 8025.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-app}_mailpit
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+    networks:
+      - app_network
+
+volumes:
+  mariadb_data:
+  redis_data:
+  composer_cache:
+
+networks:
+  app_network:
+    driver: bridge
