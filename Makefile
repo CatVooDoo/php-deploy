@@ -35,7 +35,7 @@ endef
 
 .PHONY: help init setup up down restart build rebuild ps logs shell php composer \
         mysql db-dump db-import redis-cli xdebug-on xdebug-off clean \
-        ssl ssl-test ssl-renew ssl-status ssl-enable ssl-disable \
+        ssl ssl-ip-addr ssl-test ssl-renew ssl-status ssl-enable ssl-disable \
         fix-perms check-perms
 
 help: ## Показать список команд
@@ -133,6 +133,21 @@ ssl: ## Выпустить сертификат Let's Encrypt и включит�
 	docker compose up -d nginx
 	$(CERTBOT) certonly --webroot -w /var/www/html/public \
 		$(CERTBOT_DOMAINS) --email $(SSL_EMAIL) --agree-tos --no-eff-email -n
+	@$(MAKE) --no-print-directory ssl-enable
+
+ssl-ip-addr: ## Выпустить Let's Encrypt сертификат для IP и включить HTTPS
+	@test -f .env || (echo "Нет .env — сначала make init" && exit 1)
+	@test -n "$(SSL_EMAIL)" || (echo "Задайте SSL_EMAIL в .env" && exit 1)
+	@test "$(APP_HOST)" != "localhost" || (echo "APP_HOST=localhost — укажите IP сервера в .env" && exit 1)
+	@echo "==> Выпуск IP-сертификата для: $(APP_HOST)"
+	@echo "    Используется Let's Encrypt shortlived profile."
+	$(call set_env,NGINX_TEMPLATES,./docker/nginx/templates/http)
+	docker compose up -d nginx
+	$(CERTBOT) certonly --webroot -w /var/www/html/public \
+		--preferred-profile shortlived \
+		--ip-address $(APP_HOST) \
+		--email $(SSL_EMAIL) \
+		--agree-tos --no-eff-email -n
 	@$(MAKE) --no-print-directory ssl-enable
 
 ssl-test: ## Пробный выпуск через staging-сервер (не тратит лимиты Let's Encrypt)
