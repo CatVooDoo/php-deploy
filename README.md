@@ -128,6 +128,7 @@ make composer               # composer install
 make mysql                  # консоль MariaDB
 make db-dump                # выгрузить базу в dump.sql
 make db-import FILE=x.sql   # залить дамп
+ssl-ip-addr:                # Выпустить Let's Encrypt сертификат для IP и включить HTTPS
 make ssl                    # выпустить сертификат и включить HTTPS
 make ssl-test               # пробный выпуск (staging, без расхода лимитов)
 make ssl-renew              # продлить сертификат вручную
